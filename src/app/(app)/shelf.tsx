@@ -1,10 +1,11 @@
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { BookActionSheet } from '@/components/book-action-sheet';
 import { PaperBackground } from '@/components/paper';
+import { PressableScale } from '@/components/pressable-scale';
 import { BookShelf } from '@/components/shelf-scene';
 import { FontFamily, Spacing, Type } from '@/constants/theme';
 import type { Book } from '@/db/books-repo';
@@ -28,18 +29,14 @@ export default function ShelfScreen() {
         contentContainerStyle={[styles.content, { paddingTop: Spacing.four + topInset }]}>
         <View style={styles.header}>
           <Text style={[styles.screenTitle, { color: theme.text }]}>Shelf</Text>
-          <Pressable
+          <PressableScale
             onPress={() => router.push('/add')}
             accessibilityRole="button"
             accessibilityLabel="Add a book"
-            style={({ pressed }) => [
-              styles.addHeaderButton,
-              { backgroundColor: theme.accent },
-              pressed && styles.pressed,
-            ]}>
+            style={[styles.addHeaderButton, { backgroundColor: theme.accent }]}>
             <Ionicons name="add" size={20} color="#FFFFFF" />
             <Text style={styles.addHeaderLabel}>Add</Text>
-          </Pressable>
+          </PressableScale>
         </View>
 
         {isEmpty ? (
@@ -88,18 +85,14 @@ function EmptyLibrary({ onAdd }: { onAdd: () => void }) {
         Add a book to start your library — then mark the days you read and watch the Finished
         shelf fill up.
       </Text>
-      <Pressable
+      <PressableScale
         onPress={onAdd}
         accessibilityRole="button"
         accessibilityLabel="Add your first book"
-        style={({ pressed }) => [
-          styles.emptyCta,
-          { backgroundColor: theme.accent },
-          pressed && styles.pressed,
-        ]}>
+        style={[styles.emptyCta, { backgroundColor: theme.accent }]}>
         <Ionicons name="add" size={20} color="#FFFFFF" />
         <Text style={styles.emptyCtaLabel}>Add your first book</Text>
-      </Pressable>
+      </PressableScale>
     </View>
   );
 }
@@ -215,5 +208,4 @@ const styles = StyleSheet.create({
     boxShadow: '0px 4px 12px rgba(60, 40, 25, 0.18)',
   },
   emptyCtaLabel: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
-  pressed: { opacity: 0.7 },
 });

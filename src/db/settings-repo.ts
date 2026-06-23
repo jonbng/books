@@ -5,6 +5,8 @@
  * Adding a preference = add a column (migration) + a field here + a COLUMN entry.
  */
 
+import type { ColorSchemePreference } from '@/constants/theme';
+
 import { getDb } from './database.ts';
 
 export interface Settings {
@@ -25,6 +27,8 @@ export interface Settings {
   freezeCreditStreak: number;
   /** Whether the user has finished the first-run onboarding flow. */
   onboardingComplete: boolean;
+  /** Theme choice: follow the OS, or force light / dark. */
+  themePreference: ColorSchemePreference;
 }
 
 interface SettingsRow {
@@ -37,6 +41,7 @@ interface SettingsRow {
   freezes_earned: number;
   freeze_credit_streak: number;
   onboarding_complete: number;
+  theme_preference: string;
 }
 
 const COLUMN: Record<keyof Settings, string> = {
@@ -49,6 +54,7 @@ const COLUMN: Record<keyof Settings, string> = {
   freezesEarned: 'freezes_earned',
   freezeCreditStreak: 'freeze_credit_streak',
   onboardingComplete: 'onboarding_complete',
+  themePreference: 'theme_preference',
 };
 
 function fromRow(row: SettingsRow): Settings {
@@ -62,20 +68,22 @@ function fromRow(row: SettingsRow): Settings {
     freezesEarned: row.freezes_earned,
     freezeCreditStreak: row.freeze_credit_streak,
     onboardingComplete: row.onboarding_complete === 1,
+    themePreference: row.theme_preference as ColorSchemePreference,
   };
 }
 
-/** SQLite stores booleans as 0/1; everything else passes through. */
-function toDbValue(key: keyof Settings, value: Settings[keyof Settings]): number | null {
+/** SQLite stores booleans as 0/1; strings/numbers pass through. */
+function toDbValue(key: keyof Settings, value: Settings[keyof Settings]): number | string | null {
   if (key === 'reminderEnabled' || key === 'onboardingComplete') return value ? 1 : 0;
-  return value as number | null;
+  return value as number | string | null;
 }
 
 export async function getSettings(): Promise<Settings> {
   const db = await getDb();
   const row = await db.getFirstAsync<SettingsRow>(
     `SELECT weekly_target, max_freezes, reminder_enabled, reminder_hour, reminder_minute,
-            yearly_goal, freezes_earned, freeze_credit_streak, onboarding_complete
+            yearly_goal, freezes_earned, freeze_credit_streak, onboarding_complete,
+            theme_preference
      FROM settings WHERE id = 1;`
   );
   if (!row) throw new Error('settings row missing — migrations did not run');

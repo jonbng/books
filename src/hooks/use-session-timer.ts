@@ -6,11 +6,15 @@
  * of useAppData. This hook ticks locally and is only mounted where the live time
  * is actually shown (the session screen and the Today resume strip).
  *
- * Elapsed is derived from `startedAt` against the wall clock on every render —
- * never accumulated — so it self-corrects after the JS timer is throttled in the
- * background and is instantly correct when `startedAt` changes. A 1s interval
- * (and an app-foreground event) just force a re-render; the setState lives only
- * in those callbacks, so a session "survives" being backgrounded/killed.
+ * The elapsed value is *held in state* and recomputed from `startedAt` against
+ * the wall clock inside the interval — never read from the clock during render.
+ * Reading a mutable source (the clock) at render time is impure and, under React
+ * 19 concurrent rendering, a pre-rendered-then-discarded pass can leave the
+ * committed output stale, so the clock appears frozen. Recomputing in the
+ * interval/foreground callbacks (and once immediately) keeps render pure: it just
+ * returns the last committed value, which also self-corrects after the JS timer
+ * is throttled in the background and is instantly correct when `startedAt`
+ * changes (a session "survives" being backgrounded/killed).
  */
 
 import { useEffect, useState } from 'react';
@@ -19,14 +23,18 @@ import { AppState } from 'react-native';
 import { elapsedSeconds } from '@/lib/sessions';
 
 export function useSessionTimer(startedAt: string | null): number {
-  const [, forceTick] = useState(0);
+  const [elapsed, setElapsed] = useState(() =>
+    startedAt ? elapsedSeconds(startedAt, new Date().toISOString()) : 0
+  );
 
   useEffect(() => {
+    const update = () =>
+      setElapsed(startedAt ? elapsedSeconds(startedAt, new Date().toISOString()) : 0);
+    update(); // correct immediately on mount, foreground, and `startedAt` changes
     if (!startedAt) return;
-    const bump = () => forceTick((t) => t + 1);
-    const interval = setInterval(bump, 1000);
+    const interval = setInterval(update, 1000);
     const sub = AppState.addEventListener('change', (status) => {
-      if (status === 'active') bump();
+      if (status === 'active') update();
     });
     return () => {
       clearInterval(interval);
@@ -34,5 +42,5 @@ export function useSessionTimer(startedAt: string | null): number {
     };
   }, [startedAt]);
 
-  return startedAt ? elapsedSeconds(startedAt, new Date().toISOString()) : 0;
+  return elapsed;
 }

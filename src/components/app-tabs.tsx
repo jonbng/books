@@ -1,12 +1,12 @@
 import { NativeTabs } from 'expo-router/unstable-native-tabs';
-import { useColorScheme } from 'react-native';
 
 import { NudgePill } from '@/components/today/nudge-pill';
 import { Colors } from '@/constants/theme';
+import { useColorScheme } from '@/hooks/use-color-scheme';
 
 export default function AppTabs() {
   const scheme = useColorScheme();
-  const colors = Colors[scheme === 'unspecified' ? 'light' : scheme];
+  const colors = Colors[scheme];
 
   // Android Material 3: the active-tab pill (`indicatorColor`) and the press
   // ripple (`rippleColor`) must read as *selection/feedback*, not background.

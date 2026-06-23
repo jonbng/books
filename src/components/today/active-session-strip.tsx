@@ -1,9 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import { BookCover } from '@/components/book-cover';
 import { Paper } from '@/components/paper';
+import { PressableScale } from '@/components/pressable-scale';
 import { FontFamily, Spacing, Type } from '@/constants/theme';
 import type { Book } from '@/db/books-repo';
 import type { ReadingSession } from '@/db/sessions-repo';
@@ -28,11 +29,10 @@ export function ActiveSessionStrip({
   const elapsed = useSessionTimer(session.startedAt);
 
   return (
-    <Pressable
+    <PressableScale
       onPress={() => router.push('/session')}
       accessibilityRole="button"
-      accessibilityLabel="Return to your reading session"
-      style={({ pressed }) => pressed && styles.pressed}>
+      accessibilityLabel="Return to your reading session">
       <Paper elevation="raised" style={styles.card}>
         {book ? (
           <BookCover
@@ -51,7 +51,7 @@ export function ActiveSessionStrip({
         <Text style={[styles.clock, { color: theme.text }]}>{formatDuration(elapsed)}</Text>
         <Ionicons name="chevron-forward" size={20} color={theme.textSecondary} />
       </Paper>
-    </Pressable>
+    </PressableScale>
   );
 }
 
@@ -76,5 +76,4 @@ const styles = StyleSheet.create({
     lineHeight: 26,
     fontVariant: ['tabular-nums'],
   },
-  pressed: { opacity: 0.85 },
 });

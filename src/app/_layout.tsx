@@ -9,10 +9,13 @@ import { DarkTheme, DefaultTheme, ThemeProvider, Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
-import { useColorScheme } from 'react-native';
 
 import { CelebrationProvider } from '@/components/celebration/celebration-provider';
+import { ConfirmProvider } from '@/components/confirm/confirm-provider';
+import { ErrorBoundary, ErrorScreen } from '@/components/error-boundary';
+import { ToastProvider } from '@/components/toast/toast-provider';
 import { Colors } from '@/constants/theme';
+import { ColorSchemeProvider, useColorScheme } from '@/hooks/use-color-scheme';
 import { AppDataProvider, useAppData } from '@/hooks/use-app-data';
 
 // Warm navigation themes — without these, React Navigation's defaults bleed a
@@ -49,7 +52,7 @@ const NavDark = {
 SplashScreen.preventAutoHideAsync();
 
 function RootNavigator() {
-  const { ready, needsOnboarding } = useAppData();
+  const { ready, loadError, retryLoad, needsOnboarding } = useAppData();
   // Fraunces is the app's serif voice (streak, headlines). Gate the splash on it
   // too, but render anyway on `fontError` so a missing glyph file never bricks
   // launch — the system serif shows instead.
@@ -62,8 +65,21 @@ function RootNavigator() {
   const fontsReady = fontsLoaded || !!fontError;
 
   useEffect(() => {
-    if (ready && fontsReady) void SplashScreen.hideAsync();
-  }, [ready, fontsReady]);
+    // Drop the splash once we're ready OR the load failed — otherwise a boot
+    // error would strand the user on the splash forever.
+    if ((ready || loadError) && fontsReady) void SplashScreen.hideAsync();
+  }, [ready, loadError, fontsReady]);
+
+  // The database wouldn't open or migrate — show a calm retry instead of a hang.
+  if (loadError) {
+    return (
+      <ErrorScreen
+        title="Couldn’t open your library"
+        body="Something went wrong loading your data. It’s still saved on this device."
+        onRetry={retryLoad}
+      />
+    );
+  }
 
   if (!ready || !fontsReady) return null;
 
@@ -71,9 +87,12 @@ function RootNavigator() {
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Protected guard={!needsOnboarding}>
         <Stack.Screen name="(app)" />
+        {/* Transparent modal so the shelf stays visible behind the detail page
+            — the drag-to-dismiss peels the page away to reveal it. We drive the
+            open/close ourselves (cover hero + drag), so disable the native one. */}
         <Stack.Screen
           name="book/[id]"
-          options={{ animation: 'fade', animationDuration: 280 }}
+          options={{ presentation: 'transparentModal', animation: 'none' }}
         />
         <Stack.Screen name="settings" />
         {/* Live reading-session timer — a focused, dismissible activity, not a
@@ -94,17 +113,42 @@ function RootNavigator() {
   );
 }
 
-export default function RootLayout() {
-  const colorScheme = useColorScheme();
+// Bridges the resolved scheme (which honors the user's theme override) into the
+// React Navigation theme. Must live inside ColorSchemeProvider to read it.
+function NavThemeBridge() {
+  const scheme = useColorScheme();
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? NavDark : NavLight}>
+    <ThemeProvider value={scheme === 'dark' ? NavDark : NavLight}>
       {/* Dark status-bar icons on the cream background, light icons in dark mode. */}
       <StatusBar style="auto" />
-      <AppDataProvider>
+      <ToastProvider>
         <CelebrationProvider>
-          <RootNavigator />
+          <ConfirmProvider>
+            <ErrorBoundary>
+              <RootNavigator />
+            </ErrorBoundary>
+          </ConfirmProvider>
         </CelebrationProvider>
-      </AppDataProvider>
+      </ToastProvider>
     </ThemeProvider>
+  );
+}
+
+// Reads the persisted theme preference (defaulting to "follow the OS" until
+// settings load) and resolves it for the whole app.
+function ThemedRoot() {
+  const { settings } = useAppData();
+  return (
+    <ColorSchemeProvider preference={settings?.themePreference ?? 'system'}>
+      <NavThemeBridge />
+    </ColorSchemeProvider>
+  );
+}
+
+export default function RootLayout() {
+  return (
+    <AppDataProvider>
+      <ThemedRoot />
+    </AppDataProvider>
   );
 }

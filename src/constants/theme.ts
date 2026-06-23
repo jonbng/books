@@ -32,6 +32,9 @@ export const Colors = {
 
 export type ThemeColor = keyof typeof Colors.light & keyof typeof Colors.dark;
 
+/** User's theme choice: follow the OS, or force light / dark. Persisted in settings. */
+export type ColorSchemePreference = 'system' | 'light' | 'dark';
+
 export const Fonts = Platform.select({
   ios: {
     /** iOS `UIFontDescriptorSystemDesignDefault` */

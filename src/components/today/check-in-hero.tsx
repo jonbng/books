@@ -13,9 +13,11 @@ import Animated, {
   withSpring,
 } from 'react-native-reanimated';
 
+import { useToast } from '@/components/toast/toast-provider';
 import { Elevation, FontFamily, Motion, Spacing, Type } from '@/constants/theme';
 import type { Book } from '@/db/books-repo';
 import { useTheme } from '@/hooks/use-theme';
+import { logError, toUserMessage } from '@/lib/errors';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -49,6 +51,7 @@ export function CheckInHero({
   onLogDetail,
 }: CheckInHeroProps) {
   const theme = useTheme();
+  const { show: showToast } = useToast();
   const reduced = useReducedMotion();
 
   const scale = useSharedValue(1);
@@ -93,7 +96,15 @@ export function CheckInHero({
       withSpring(1, { ...Motion.successSpring, reduceMotion: ReduceMotion.System })
     );
     await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    await onToggle();
+    try {
+      await onToggle();
+    } catch (err) {
+      // The write failed, so the reload won't flip `readToday` and the sync
+      // effect won't run — roll the optimistic fill back ourselves and tell them.
+      fill.set(withSpring(0, { ...Motion.successSpring, reduceMotion: ReduceMotion.System }));
+      logError('checkIn.mark', err);
+      showToast(toUserMessage(err, 'Couldn’t save today’s check-in. Please try again.'));
+    }
   };
 
   const undo = async () => {
@@ -101,7 +112,13 @@ export function CheckInHero({
       withSpring(0, { ...Motion.successSpring, reduceMotion: ReduceMotion.System })
     );
     await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-    await onToggle();
+    try {
+      await onToggle();
+    } catch (err) {
+      fill.set(withSpring(1, { ...Motion.successSpring, reduceMotion: ReduceMotion.System }));
+      logError('checkIn.undo', err);
+      showToast(toUserMessage(err, 'Couldn’t undo today’s check-in. Please try again.'));
+    }
   };
 
   return (
@@ -182,9 +199,27 @@ function DetailEditor({
   const [pickerOpen, setPickerOpen] = useState(false);
   const commitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // The editor is this surface's only writer for its lifetime: it mounts with
-  // the store-confirmed detail (above) and remounts fresh after an undo, so no
-  // store→local sync effect is needed — only the pending-commit cleanup.
+  // A finished reading session is a *second* writer to today's detail (it folds
+  // its pages into reading_days), so the editor can't assume it owns the value
+  // for its lifetime. Reconcile local state when the store value changes — e.g.
+  // after returning from a session that recorded pages — otherwise the next
+  // stepper tap would commit our stale count and clobber the session's pages.
+  // Our own debounced edits don't fight this: the store only changes once the
+  // commit lands (with the value we just set), so the reconcile is a no-op then.
+  // Done during render (tracking the last-seen store value) rather than in an
+  // effect, so there's no extra commit-then-rerender pass.
+  const [seenPages, setSeenPages] = useState(todayDetail?.pages);
+  if (todayDetail?.pages != null && todayDetail.pages !== seenPages) {
+    setSeenPages(todayDetail.pages);
+    setPages(todayDetail.pages);
+  }
+  const [seenBookId, setSeenBookId] = useState(todayDetail?.bookId);
+  if (todayDetail?.bookId != null && todayDetail.bookId !== seenBookId) {
+    setSeenBookId(todayDetail.bookId);
+    setBookId(todayDetail.bookId);
+  }
+
+  // Cancel any pending debounced commit on unmount.
   useEffect(
     () => () => {
       if (commitTimer.current) clearTimeout(commitTimer.current);

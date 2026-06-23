@@ -15,9 +15,11 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BookCover } from '@/components/book-cover';
 import { IconButton } from '@/components/icon-button';
 import { Paper, PaperBackground } from '@/components/paper';
+import { useToast } from '@/components/toast/toast-provider';
 import { FontFamily, Spacing, Type } from '@/constants/theme';
 import { useAppData } from '@/hooks/use-app-data';
 import { useTheme } from '@/hooks/use-theme';
+import { logError, toUserMessage } from '@/lib/errors';
 import type { BookSearchResult } from '@/services/open-library';
 
 /**
@@ -32,6 +34,7 @@ import type { BookSearchResult } from '@/services/open-library';
 export default function AddBookScreen() {
   const data = useAppData();
   const theme = useTheme();
+  const { show: showToast } = useToast();
   const insets = useSafeAreaInsets();
   const searchRef = useRef<TextInput>(null);
   const [query, setQuery] = useState('');
@@ -71,6 +74,12 @@ export default function AddBookScreen() {
     try {
       setResults(await data.searchBooks(query));
       setSearched(true);
+    } catch (err) {
+      logError('add.onSearch', err);
+      showToast(toUserMessage(err, 'Couldn’t search right now. Please try again.'), {
+        actionLabel: 'Retry',
+        onAction: onSearch,
+      });
     } finally {
       setSearching(false);
     }
@@ -78,7 +87,18 @@ export default function AddBookScreen() {
 
   async function onAdd(result: BookSearchResult) {
     setAddedKeys((prev) => new Set(prev).add(result.key)); // optimistic
-    await data.addBookFromSearch(result, 'want_to_read');
+    try {
+      await data.addBookFromSearch(result, 'want_to_read');
+    } catch (err) {
+      // Roll back the optimistic "In library" badge so the Add button returns.
+      setAddedKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(result.key);
+        return next;
+      });
+      logError('add.onAdd', err);
+      showToast(toUserMessage(err, 'Couldn’t add that book. Please try again.'));
+    }
   }
 
   // Before a search, fill the space with trending picks; after, show results.

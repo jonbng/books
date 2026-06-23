@@ -1,76 +1,247 @@
 import * as Haptics from 'expo-haptics';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useEffect, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, {
   Easing,
+  Extrapolation,
   FadeIn,
+  interpolate,
   ReduceMotion,
+  runOnJS,
+  useAnimatedRef,
+  useAnimatedScrollHandler,
   useAnimatedStyle,
   useReducedMotion,
   useSharedValue,
-  withDelay,
   withSpring,
   withTiming,
 } from 'react-native-reanimated';
 
 import { BookCover } from '@/components/book-cover';
 import { useCelebration } from '@/components/celebration/celebration-provider';
-import { Paper, PaperBackground } from '@/components/paper';
+import { useConfirm } from '@/components/confirm/confirm-provider';
+import { Paper } from '@/components/paper';
+import { PressableScale } from '@/components/pressable-scale';
 import { ScreenHeader } from '@/components/screen-header';
+import { useToast } from '@/components/toast/toast-provider';
 import { FontFamily, Motion, Spacing, Type } from '@/constants/theme';
 import { useAppData } from '@/hooks/use-app-data';
 import { useBookDetails } from '@/hooks/use-book-details';
 import { useTheme } from '@/hooks/use-theme';
 import { daysToFinish, readingPercent, SHELF_LABELS, type Shelf } from '@/lib/books';
 import { formatLongDate } from '@/lib/dates';
+import { logError, toUserMessage } from '@/lib/errors';
 
 const SHELF_ORDER: Shelf[] = ['want_to_read', 'reading', 'finished'];
 
+// House easing as a worklet-safe timing config.
+const HERO_IN = {
+  duration: 440,
+  easing: Easing.bezier(...Motion.easingBezier),
+} as const;
+const HERO_OUT = {
+  duration: 300,
+  easing: Easing.bezier(...Motion.easingBezier),
+} as const;
+
 export default function BookScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const params = useLocalSearchParams<{
+    id: string;
+    ox?: string;
+    oy?: string;
+    ow?: string;
+    oh?: string;
+  }>();
+  const { id } = params;
   const data = useAppData();
   const theme = useTheme();
   const { celebrate } = useCelebration();
+  const confirm = useConfirm();
+  const { show: showToast } = useToast();
   const book = data.books.find((b) => b.id === Number(id));
   const { details, loading: detailsLoading } = useBookDetails(book?.openLibraryKey ?? null);
 
-  // Open animation: the cover springs up into place while title/author rise in
-  // just behind it — the book "arrives" on the page (DESIGN-UI.md motion).
+  const { height: screenH } = useWindowDimensions();
   const reduced = useReducedMotion();
-  const enter = useSharedValue(reduced ? 1 : 0);
-  const meta = useSharedValue(reduced ? 1 : 0);
-  useEffect(() => {
-    enter.set(withSpring(1, { ...Motion.successSpring, reduceMotion: ReduceMotion.System }));
-    meta.set(
-      withDelay(
-        90,
-        withTiming(1, {
-          duration: Motion.durations.base,
-          easing: Easing.bezier(...Motion.easingBezier),
-          reduceMotion: ReduceMotion.System,
-        })
-      )
-    );
-  }, [enter, meta]);
 
-  const coverStyle = useAnimatedStyle(() => ({
-    opacity: Math.min(1, enter.get() * 1.4),
-    transform: [{ scale: 0.84 + 0.16 * enter.get() }, { translateY: (1 - enter.get()) * 40 }],
+  // The shelf cover's on-screen rect (window coords) passed from the tap, if we
+  // arrived from a cover. Drives the shared-element fly between shelf and page.
+  const origin = useMemo(() => {
+    const ox = Number(params.ox);
+    const oy = Number(params.oy);
+    const ow = Number(params.ow);
+    const oh = Number(params.oh);
+    if ([ox, oy, ow, oh].every(Number.isFinite) && ow > 0 && oh > 0) {
+      return { x: ox, y: oy, w: ow, h: oh };
+    }
+    return null;
+  }, [params.ox, params.oy, params.ow, params.oh]);
+
+  // enter: 0 = page gone / cover sitting on the shelf, 1 = fully open on the page.
+  // dragY: live downward drag of the page (finger-attached dismiss).
+  const enter = useSharedValue(reduced ? 1 : 0);
+  const dragY = useSharedValue(0);
+  // The detail cover's natural (final) rect, measured on mount; the cover flies
+  // between this and `origin` (FLIP). measured gates visibility to avoid a flash.
+  const naturalRect = useSharedValue({ x: 0, y: 0, w: 0, h: 0 });
+  // Hold the cover hidden only while we await its measurement for the fly — but
+  // with no origin (or reduced motion) there's nothing to wait for.
+  const measured = useSharedValue(origin && !reduced ? 0 : 1);
+
+  const coverWrapRef = useRef<View>(null);
+  const scrollRef = useAnimatedRef<Animated.ScrollView>();
+  const scrollY = useSharedValue(0);
+  const atTop = useSharedValue(false);
+  const started = useRef(false);
+
+  const startEnter = useCallback(() => {
+    if (started.current || reduced) return;
+    started.current = true;
+    enter.set(withTiming(1, HERO_IN));
+  }, [enter, reduced]);
+
+  // No cover origin → nothing to measure; play a centered fade/scale-in on mount.
+  useEffect(() => {
+    if (!origin) startEnter();
+  }, [origin, startEnter]);
+
+  const onCoverLayout = useCallback(() => {
+    if (!origin) return;
+    coverWrapRef.current?.measureInWindow((x, y, w, h) => {
+      if (!w || !h) return;
+      naturalRect.set({ x, y, w, h });
+      measured.set(1);
+      startEnter();
+    });
+  }, [origin, naturalRect, measured, startEnter]);
+
+  const popBack = useCallback(() => router.back(), []);
+
+  // Reverse the hero, then pop. The back button and a committed drag both use this.
+  const close = useCallback(() => {
+    if (reduced) {
+      router.back();
+      return;
+    }
+    dragY.set(withTiming(0, { duration: Motion.durations.base }));
+    enter.set(
+      withTiming(0, HERO_OUT, (finished) => {
+        if (finished) runOnJS(popBack)();
+      }),
+    );
+  }, [reduced, dragY, enter, popBack]);
+
+  const DISMISS = screenH * 0.28;
+
+  const scrollHandler = useAnimatedScrollHandler((e) => {
+    scrollY.set(e.contentOffset.y);
+  });
+
+  // Drag the page down to dismiss — but only when the scroll view starts at the
+  // top, so it never fights an upward scroll. All on the UI thread → Android too.
+  const pan = Gesture.Pan()
+    .activeOffsetY(14)
+    // Runtime-valid; the animated ref's type is narrower than the API's.
+    // eslint-disable-next-line react-hooks/refs
+    .simultaneousWithExternalGesture(scrollRef as never)
+    .onBegin(() => {
+      atTop.set(scrollY.get() <= 0);
+    })
+    .onUpdate((e) => {
+      if (atTop.get() && e.translationY > 0) dragY.set(e.translationY);
+    })
+    .onEnd((e) => {
+      if (!atTop.get()) return;
+      if (dragY.get() > DISMISS || e.velocityY > 1100) {
+        dragY.set(withTiming(0, { duration: Motion.durations.base }));
+        enter.set(
+          withTiming(0, HERO_OUT, (finished) => {
+            if (finished) runOnJS(popBack)();
+          }),
+        );
+      } else {
+        dragY.set(withSpring(0, Motion.successSpring));
+      }
+    });
+
+  // The cover's FLIP transform: at enter=0 it sits exactly over `origin` (its
+  // spot on the shelf), at enter=1 it rests in its natural place on the page.
+  const coverStyle = useAnimatedStyle(() => {
+    const n = naturalRect.get();
+    if (!origin || n.w === 0) {
+      // Fallback (no origin) or not yet measured: a quiet scale-in / hold hidden.
+      return {
+        opacity: origin ? measured.get() : 1,
+        transform: [
+          {
+            scale: interpolate(enter.get(), [0, 1], [origin ? 1 : 0.92, 1], Extrapolation.CLAMP),
+          },
+        ],
+      };
+    }
+    const e = enter.get();
+    const scale = interpolate(e, [0, 1], [origin.w / n.w, 1], Extrapolation.CLAMP);
+    const tx = interpolate(
+      e,
+      [0, 1],
+      [origin.x + origin.w / 2 - (n.x + n.w / 2), 0],
+      Extrapolation.CLAMP,
+    );
+    const ty = interpolate(
+      e,
+      [0, 1],
+      [origin.y + origin.h / 2 - (n.y + n.h / 2), 0],
+      Extrapolation.CLAMP,
+    );
+    return {
+      opacity: 1,
+      transform: [{ translateX: tx }, { translateY: ty }, { scale }],
+    };
+  });
+
+  // The page itself: follows the finger down, shrinks and rounds its corners so
+  // it reads as a card peeling away to reveal the shelf behind (transparent modal).
+  const pageStyle = useAnimatedStyle(() => {
+    const dy = dragY.get();
+    return {
+      borderRadius: interpolate(dy, [0, 60], [0, 30], Extrapolation.CLAMP),
+      transform: [
+        { translateY: dy },
+        { scale: interpolate(dy, [0, screenH], [1, 0.9], Extrapolation.CLAMP) },
+      ],
+    };
+  });
+  // The paper plane fades in with the hero (and out on close), so for the first
+  // instant the shelf still shows behind the flying cover.
+  const bgStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(enter.get(), [0, 0.5], [0, 1], Extrapolation.CLAMP),
   }));
-  const metaStyle = useAnimatedStyle(() => ({
-    opacity: meta.get(),
-    transform: [{ translateY: (1 - meta.get()) * 10 }],
+  // Everything that isn't the cover rises and fades in just behind it.
+  const contentStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(enter.get(), [0.25, 1], [0, 1], Extrapolation.CLAMP),
+    transform: [
+      {
+        translateY: interpolate(enter.get(), [0.25, 1], [10, 0], Extrapolation.CLAMP),
+      },
+    ],
+  }));
+  // A dim scrim over the shelf behind — strongest when open, clearing as you drag.
+  const scrimStyle = useAnimatedStyle(() => ({
+    opacity:
+      interpolate(enter.get(), [0, 1], [0, 0.32], Extrapolation.CLAMP) *
+      interpolate(dragY.get(), [0, DISMISS], [1, 0], Extrapolation.CLAMP),
   }));
 
   if (!book) {
     return (
-      <PaperBackground>
+      <View style={[styles.root, { backgroundColor: theme.background }]}>
         <ScreenHeader title="" />
         <View style={styles.missing}>
           <Text style={{ color: theme.textSecondary }}>This book is no longer on your shelf.</Text>
         </View>
-      </PaperBackground>
+      </View>
     );
   }
 
@@ -79,192 +250,255 @@ export default function BookScreen() {
   async function onMove(shelf: Shelf) {
     if (!book || shelf === book.shelf) return;
     await Haptics.selectionAsync();
-    await data.moveBookToShelf(book.id, shelf);
+    try {
+      await data.moveBookToShelf(book.id, shelf);
+    } catch (err) {
+      logError('book.onMove', err);
+      showToast(toUserMessage(err, 'Couldn’t move that book. Please try again.'));
+    }
   }
 
   async function onFinish() {
     if (!book) return;
     await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    await data.finishBook(book.id);
-    celebrate({ kind: 'book-finished', book });
+    try {
+      await data.finishBook(book.id);
+      celebrate({ kind: 'book-finished', book });
+    } catch (err) {
+      logError('book.onFinish', err);
+      showToast(toUserMessage(err, 'Couldn’t mark that finished. Please try again.'));
+    }
   }
 
   async function onStartSession() {
     if (!book) return;
     // If a session is already running, this button reads "Resume" and just
     // returns to it (starting a second would violate the one-active invariant).
-    if (!data.activeSession) await data.startSession(book.id);
-    router.push('/session');
+    try {
+      if (!data.activeSession) await data.startSession(book.id);
+      router.push('/session');
+    } catch (err) {
+      logError('book.onStartSession', err);
+      showToast(toUserMessage(err, 'Couldn’t start a session. Please try again.'));
+    }
   }
 
-  function changePage(delta: number) {
+  async function changePage(delta: number) {
     if (!book) return;
     const max = book.totalPages ?? Number.MAX_SAFE_INTEGER;
     const next = Math.max(0, Math.min(max, book.currentPage + delta));
-    void data.setBookProgress(book.id, next);
+    try {
+      await data.setBookProgress(book.id, next);
+    } catch (err) {
+      logError('book.changePage', err);
+      showToast(toUserMessage(err, 'Couldn’t update your progress. Please try again.'));
+    }
   }
 
   async function onDelete() {
     if (!book) return;
-    await data.deleteBook(book.id);
-    router.back();
+    const ok = await confirm({
+      title: 'Remove from library',
+      message: `Remove "${book.title}" from your library? This can't be undone.`,
+      confirmLabel: 'Remove',
+      destructive: true,
+    });
+    if (!ok) return;
+    try {
+      await data.deleteBook(book.id);
+      router.back();
+    } catch (err) {
+      logError('book.onDelete', err);
+      showToast(toUserMessage(err, 'Couldn’t remove that book. Please try again.'));
+    }
   }
 
   return (
-    <PaperBackground>
-      <ScreenHeader title="" />
-      <ScrollView contentContainerStyle={styles.content}>
-        <View style={styles.hero}>
-          <Animated.View style={coverStyle}>
-            <BookCover
-              coverUrl={book.coverUrl}
-              coverWidth={book.coverWidth}
-              coverHeight={book.coverHeight}
-              height={248}
-              elevation="hero"
-            />
-          </Animated.View>
-          <Animated.View style={[styles.heroMeta, metaStyle]}>
-            <Text style={[styles.title, { color: theme.text }]}>{book.title}</Text>
-            {book.author ? (
-              <Text style={[styles.author, { color: theme.textSecondary }]}>{book.author}</Text>
-            ) : null}
-          </Animated.View>
-          <BookFacts
-            year={details?.firstPublishYear ?? null}
-            pages={book.totalPages}
-            ratingAverage={details?.ratingAverage ?? null}
-            ratingCount={details?.ratingCount ?? 0}
+    <GestureHandlerRootView style={styles.root}>
+      {/* Dim the live shelf showing through the transparent modal, clearing as
+          the page is dragged away. */}
+      <Animated.View
+        pointerEvents="none"
+        style={[StyleSheet.absoluteFill, styles.scrim, scrimStyle]}
+      />
+      <GestureDetector gesture={pan}>
+        <Animated.View style={[styles.page, pageStyle]}>
+          {/* Paper plane — fades in/out so the flying cover crosses over the shelf. */}
+          <Animated.View
+            style={[StyleSheet.absoluteFill, { backgroundColor: theme.background }, bgStyle]}
           />
-        </View>
+          <Animated.View style={contentStyle}>
+            <ScreenHeader title="" onBack={close} />
+          </Animated.View>
+          <Animated.ScrollView
+            ref={scrollRef}
+            onScroll={scrollHandler}
+            scrollEventThrottle={16}
+            contentContainerStyle={styles.content}
+          >
+            <View style={styles.hero}>
+              {/* Untransformed wrapper measured for the FLIP; the inner view flies. */}
+              <View ref={coverWrapRef} onLayout={onCoverLayout} collapsable={false}>
+                <Animated.View style={coverStyle}>
+                  <BookCover
+                    coverUrl={book.coverUrl}
+                    coverWidth={book.coverWidth}
+                    coverHeight={book.coverHeight}
+                    height={248}
+                    elevation="hero"
+                  />
+                </Animated.View>
+              </View>
+              <Animated.View style={[styles.heroMeta, contentStyle]}>
+                <Text style={[styles.title, { color: theme.text }]}>{book.title}</Text>
+                {book.author ? (
+                  <Text style={[styles.author, { color: theme.textSecondary }]}>{book.author}</Text>
+                ) : null}
+              </Animated.View>
+              <BookFacts
+                year={details?.firstPublishYear ?? null}
+                pages={book.totalPages}
+                ratingAverage={details?.ratingAverage ?? null}
+                ratingCount={details?.ratingCount ?? 0}
+              />
+            </View>
 
-        {/* Shelf status */}
-        <View style={styles.segment}>
-          {SHELF_ORDER.map((shelf) => {
-            const active = shelf === book.shelf;
-            return (
+            <Animated.View style={[styles.afterHero, contentStyle]}>
+              {/* Shelf status */}
+              <View style={styles.segment}>
+                {SHELF_ORDER.map((shelf) => {
+                  const active = shelf === book.shelf;
+                  return (
+                    <PressableScale
+                      key={shelf}
+                      onPress={() => onMove(shelf)}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected: active }}
+                      accessibilityLabel={SHELF_LABELS[shelf]}
+                      style={[
+                        styles.segItem,
+                        {
+                          backgroundColor: active ? theme.accent : theme.backgroundElement,
+                        },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.segText,
+                          { color: active ? '#FFFFFF' : theme.textSecondary },
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {SHELF_LABELS[shelf]}
+                      </Text>
+                    </PressableScale>
+                  );
+                })}
+              </View>
+
+              {/* Finished — a small "you read this" summary in place of the steppers */}
+              {book.shelf === 'finished' ? (
+                <FinishedSummary
+                  finishedAt={book.finishedAt}
+                  startedAt={book.startedAt}
+                  totalPages={book.totalPages}
+                />
+              ) : null}
+
+              {/* Progress */}
+              {book.shelf === 'reading' ? (
+                <Paper style={styles.progressCard}>
+                  <Text style={[styles.cardLabel, { color: theme.textSecondary }]}>PROGRESS</Text>
+                  <View style={styles.progressRow}>
+                    <Stepper label="−10" onPress={() => changePage(-10)} />
+                    <Stepper label="−1" onPress={() => changePage(-1)} />
+                    <View style={styles.pageReadout}>
+                      <Text style={[styles.pageNum, { color: theme.text }]}>
+                        {book.currentPage}
+                        {book.totalPages ? (
+                          <Text style={{ color: theme.textSecondary }}> / {book.totalPages}</Text>
+                        ) : null}
+                      </Text>
+                      {book.totalPages ? (
+                        <Text style={[styles.pagePct, { color: theme.accent }]}>{percent}%</Text>
+                      ) : null}
+                    </View>
+                    <Stepper label="+1" onPress={() => changePage(1)} />
+                    <Stepper label="+10" onPress={() => changePage(10)} />
+                  </View>
+                  <View style={[styles.track, { backgroundColor: theme.backgroundSelected }]}>
+                    <View
+                      style={[styles.fill, { width: `${percent}%`, backgroundColor: theme.accent }]}
+                    />
+                  </View>
+                  <TotalPagesEditor
+                    total={book.totalPages}
+                    onSet={(n) =>
+                      data.setBookTotalPages(book.id, n).catch((err) => {
+                        logError('book.setTotalPages', err);
+                        showToast(toUserMessage(err, 'Couldn’t update the page count.'));
+                      })
+                    }
+                  />
+                </Paper>
+              ) : null}
+
+              {/* Start / resume a timed session — hidden if a session for another book
+            is running, since only one can be active at a time. */}
+              {book.shelf === 'reading' &&
+              (!data.activeSession || data.activeSession.bookId === book.id) ? (
+                <PressableScale
+                  onPress={onStartSession}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    data.activeSession?.bookId === book.id
+                      ? 'Resume reading session'
+                      : 'Start reading session'
+                  }
+                  style={[styles.sessionButton, { borderColor: theme.accent }]}
+                >
+                  <Text style={[styles.sessionText, { color: theme.accent }]}>
+                    {data.activeSession?.bookId === book.id
+                      ? 'Resume reading session'
+                      : 'Start reading session'}
+                  </Text>
+                </PressableScale>
+              ) : null}
+
+              {/* Finish */}
+              {book.shelf === 'reading' ? (
+                <PressableScale
+                  onPress={onFinish}
+                  accessibilityRole="button"
+                  accessibilityLabel="Mark as finished"
+                  style={[styles.finishButton, { backgroundColor: theme.accent }]}
+                >
+                  <Text style={styles.finishText}>Mark as finished</Text>
+                </PressableScale>
+              ) : null}
+
+              {/* About — description + subjects from Open Library */}
+              <AboutSection
+                description={details?.description ?? null}
+                subjects={details?.subjects ?? []}
+                loading={detailsLoading}
+              />
+
               <Pressable
-                key={shelf}
-                onPress={() => onMove(shelf)}
+                onPress={onDelete}
                 accessibilityRole="button"
-                accessibilityState={{ selected: active }}
-                accessibilityLabel={SHELF_LABELS[shelf]}
-                style={({ pressed }) => [
-                  styles.segItem,
-                  { backgroundColor: active ? theme.accent : theme.backgroundElement },
-                  pressed && styles.pressed,
-                ]}>
-                <Text
-                  style={[
-                    styles.segText,
-                    { color: active ? '#FFFFFF' : theme.textSecondary },
-                  ]}
-                  numberOfLines={1}>
-                  {SHELF_LABELS[shelf]}
+                accessibilityLabel="Remove from library"
+                style={({ pressed }) => [styles.deleteButton, pressed && styles.pressed]}
+              >
+                <Text style={[styles.deleteText, { color: theme.textSecondary }]}>
+                  Remove from library
                 </Text>
               </Pressable>
-            );
-          })}
-        </View>
-
-        {/* Finished — a small "you read this" summary in place of the steppers */}
-        {book.shelf === 'finished' ? (
-          <FinishedSummary
-            finishedAt={book.finishedAt}
-            startedAt={book.startedAt}
-            totalPages={book.totalPages}
-          />
-        ) : null}
-
-        {/* Progress */}
-        {book.shelf === 'reading' ? (
-          <Paper style={styles.progressCard}>
-            <Text style={[styles.cardLabel, { color: theme.textSecondary }]}>PROGRESS</Text>
-            <View style={styles.progressRow}>
-              <Stepper label="−10" onPress={() => changePage(-10)} />
-              <Stepper label="−1" onPress={() => changePage(-1)} />
-              <View style={styles.pageReadout}>
-                <Text style={[styles.pageNum, { color: theme.text }]}>
-                  {book.currentPage}
-                  {book.totalPages ? (
-                    <Text style={{ color: theme.textSecondary }}> / {book.totalPages}</Text>
-                  ) : null}
-                </Text>
-                {book.totalPages ? (
-                  <Text style={[styles.pagePct, { color: theme.accent }]}>{percent}%</Text>
-                ) : null}
-              </View>
-              <Stepper label="+1" onPress={() => changePage(1)} />
-              <Stepper label="+10" onPress={() => changePage(10)} />
-            </View>
-            <View style={[styles.track, { backgroundColor: theme.backgroundSelected }]}>
-              <View style={[styles.fill, { width: `${percent}%`, backgroundColor: theme.accent }]} />
-            </View>
-            <TotalPagesEditor
-              total={book.totalPages}
-              onSet={(n) => data.setBookTotalPages(book.id, n)}
-            />
-          </Paper>
-        ) : null}
-
-        {/* Start / resume a timed session — hidden if a session for another book
-            is running, since only one can be active at a time. */}
-        {book.shelf === 'reading' &&
-        (!data.activeSession || data.activeSession.bookId === book.id) ? (
-          <Pressable
-            onPress={onStartSession}
-            accessibilityRole="button"
-            accessibilityLabel={
-              data.activeSession?.bookId === book.id
-                ? 'Resume reading session'
-                : 'Start reading session'
-            }
-            style={({ pressed }) => [
-              styles.sessionButton,
-              { borderColor: theme.accent },
-              pressed && styles.pressed,
-            ]}>
-            <Text style={[styles.sessionText, { color: theme.accent }]}>
-              {data.activeSession?.bookId === book.id
-                ? 'Resume reading session'
-                : 'Start reading session'}
-            </Text>
-          </Pressable>
-        ) : null}
-
-        {/* Finish */}
-        {book.shelf === 'reading' ? (
-          <Pressable
-            onPress={onFinish}
-            accessibilityRole="button"
-            accessibilityLabel="Mark as finished"
-            style={({ pressed }) => [
-              styles.finishButton,
-              { backgroundColor: theme.accent },
-              pressed && styles.pressed,
-            ]}>
-            <Text style={styles.finishText}>Mark as finished</Text>
-          </Pressable>
-        ) : null}
-
-        {/* About — description + subjects from Open Library */}
-        <AboutSection
-          description={details?.description ?? null}
-          subjects={details?.subjects ?? []}
-          loading={detailsLoading}
-        />
-
-        <Pressable
-          onPress={onDelete}
-          accessibilityRole="button"
-          accessibilityLabel="Remove from library"
-          style={({ pressed }) => [styles.deleteButton, pressed && styles.pressed]}>
-          <Text style={[styles.deleteText, { color: theme.textSecondary }]}>
-            Remove from library
-          </Text>
-        </Pressable>
-      </ScrollView>
-    </PaperBackground>
+            </Animated.View>
+          </Animated.ScrollView>
+        </Animated.View>
+      </GestureDetector>
+    </GestureHandlerRootView>
   );
 }
 
@@ -272,17 +506,14 @@ function Stepper({ label, onPress }: { label: string; onPress: () => void }) {
   const theme = useTheme();
   const n = label.replace('−', '-');
   return (
-    <Pressable
+    <PressableScale
       onPress={onPress}
       accessibilityRole="button"
       accessibilityLabel={`${n.startsWith('-') ? 'Back' : 'Forward'} ${n.replace(/[+-]/, '')} pages`}
-      style={({ pressed }) => [
-        styles.stepper,
-        { backgroundColor: theme.backgroundSelected },
-        pressed && styles.pressed,
-      ]}>
+      style={[styles.stepper, { backgroundColor: theme.backgroundSelected }]}
+    >
       <Text style={[styles.stepperText, { color: theme.text }]}>{label}</Text>
-    </Pressable>
+    </PressableScale>
   );
 }
 
@@ -312,7 +543,10 @@ function TotalPagesEditor({
         placeholderTextColor={theme.textSecondary}
         selectionColor={theme.accent}
         cursorColor={theme.accent}
-        style={[styles.totalInput, { backgroundColor: theme.backgroundSelected, color: theme.text }]}
+        style={[
+          styles.totalInput,
+          { backgroundColor: theme.backgroundSelected, color: theme.text },
+        ]}
       />
     </View>
   );
@@ -339,7 +573,8 @@ function BookFacts({
   return (
     <Animated.View
       entering={FadeIn.duration(Motion.durations.base).reduceMotion(ReduceMotion.System)}
-      style={styles.facts}>
+      style={styles.facts}
+    >
       {facts.length > 0 ? (
         <View style={styles.factRow}>
           {facts.map((fact, i) => (
@@ -366,7 +601,8 @@ function Stars({ average, count }: { average: number; count: number }) {
         {[1, 2, 3, 4, 5].map((n) => (
           <Text
             key={n}
-            style={[styles.star, { color: n <= rounded ? theme.accent : theme.backgroundSelected }]}>
+            style={[styles.star, { color: n <= rounded ? theme.accent : theme.backgroundSelected }]}
+          >
             ★
           </Text>
         ))}
@@ -395,10 +631,22 @@ function AboutSection({
   if (loading && !description && subjects.length === 0) {
     return (
       <Paper style={styles.aboutCard}>
-        <View style={[styles.skeleton, styles.skeletonLabel, { backgroundColor: theme.backgroundSelected }]} />
+        <View
+          style={[
+            styles.skeleton,
+            styles.skeletonLabel,
+            { backgroundColor: theme.backgroundSelected },
+          ]}
+        />
         <View style={[styles.skeleton, { backgroundColor: theme.backgroundSelected }]} />
         <View style={[styles.skeleton, { backgroundColor: theme.backgroundSelected }]} />
-        <View style={[styles.skeleton, styles.skeletonShort, { backgroundColor: theme.backgroundSelected }]} />
+        <View
+          style={[
+            styles.skeleton,
+            styles.skeletonShort,
+            { backgroundColor: theme.backgroundSelected },
+          ]}
+        />
       </Paper>
     );
   }
@@ -410,13 +658,15 @@ function AboutSection({
   return (
     <Animated.View
       entering={FadeIn.duration(Motion.durations.base).reduceMotion(ReduceMotion.System)}
-      style={styles.about}>
+      style={styles.about}
+    >
       {description ? (
         <Paper style={styles.aboutCard}>
           <Text style={[styles.cardLabel, { color: theme.textSecondary }]}>ABOUT</Text>
           <Text
             style={[styles.description, { color: theme.text }]}
-            numberOfLines={expanded ? undefined : 6}>
+            numberOfLines={expanded ? undefined : 6}
+          >
             {description}
           </Text>
           {long ? (
@@ -472,7 +722,8 @@ function FinishedSummary({
           {tiles.map((tile) => (
             <View
               key={tile.label}
-              style={[styles.statTile, { backgroundColor: theme.backgroundSelected }]}>
+              style={[styles.statTile, { backgroundColor: theme.backgroundSelected }]}
+            >
               <Text style={[styles.statValue, { color: theme.text }]}>{tile.value}</Text>
               <Text style={[styles.statLabel, { color: theme.textSecondary }]}>{tile.label}</Text>
             </View>
@@ -484,8 +735,24 @@ function FinishedSummary({
 }
 
 const styles = StyleSheet.create({
-  content: { padding: Spacing.four, paddingBottom: Spacing.six, gap: Spacing.four },
-  missing: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: Spacing.five },
+  // Transparent root so the live shelf behind the (transparent-modal) screen
+  // shows through as the page is dragged away.
+  root: { flex: 1, backgroundColor: 'transparent' },
+  // The page card itself; overflow hidden lets the corner radius clip on drag.
+  page: { flex: 1, overflow: 'hidden' },
+  scrim: { backgroundColor: '#000' },
+  content: {
+    padding: Spacing.four,
+    paddingBottom: Spacing.six,
+    gap: Spacing.four,
+  },
+  afterHero: { gap: Spacing.four },
+  missing: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: Spacing.five,
+  },
   hero: { alignItems: 'center', gap: Spacing.three, paddingTop: Spacing.two },
   heroMeta: { alignItems: 'center', gap: 2 },
   title: {
@@ -504,7 +771,11 @@ const styles = StyleSheet.create({
   starsRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
   stars: { flexDirection: 'row', gap: 2 },
   star: { fontSize: 16 },
-  ratingText: { fontSize: 13, fontWeight: '600', fontVariant: ['tabular-nums'] },
+  ratingText: {
+    fontSize: 13,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
   about: { gap: Spacing.three },
   aboutCard: { padding: Spacing.four, gap: Spacing.two },
   description: { fontFamily: FontFamily.regular, fontSize: 16, lineHeight: 24 },
@@ -537,7 +808,11 @@ const styles = StyleSheet.create({
   },
   progressCard: { padding: Spacing.four, gap: Spacing.three },
   finishedCard: { padding: Spacing.four, gap: Spacing.three },
-  finishedDate: { fontFamily: FontFamily.semibold, fontSize: 18, lineHeight: 24 },
+  finishedDate: {
+    fontFamily: FontFamily.semibold,
+    fontSize: 18,
+    lineHeight: 24,
+  },
   statRow: { flexDirection: 'row', gap: Spacing.two },
   statTile: {
     flex: 1,
@@ -547,7 +822,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 2,
   },
-  statValue: { fontFamily: FontFamily.semibold, fontSize: 24, fontVariant: ['tabular-nums'] },
+  statValue: {
+    fontFamily: FontFamily.semibold,
+    fontSize: 24,
+    fontVariant: ['tabular-nums'],
+  },
   statLabel: { fontSize: 13, fontWeight: '600' },
   progressRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
   pageReadout: { flex: 1, alignItems: 'center' },
@@ -584,7 +863,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  stepperText: { fontSize: 15, fontWeight: '700', fontVariant: ['tabular-nums'] },
+  stepperText: {
+    fontSize: 15,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+  },
   finishButton: {
     paddingVertical: Spacing.four,
     borderRadius: Spacing.four,

@@ -5,10 +5,14 @@ import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useCelebration } from '@/components/celebration/celebration-provider';
+import { useConfirm } from '@/components/confirm/confirm-provider';
+import { PressableScale } from '@/components/pressable-scale';
+import { useToast } from '@/components/toast/toast-provider';
 import { FontFamily, Spacing } from '@/constants/theme';
 import type { Book } from '@/db/books-repo';
 import { useAppData } from '@/hooks/use-app-data';
 import { useTheme } from '@/hooks/use-theme';
+import { logError, toUserMessage } from '@/lib/errors';
 
 type Action = {
   label: string;
@@ -26,6 +30,8 @@ export function BookActionSheet({ book, onClose }: { book: Book | null; onClose:
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const { celebrate } = useCelebration();
+  const confirm = useConfirm();
+  const { show: showToast } = useToast();
 
   const actions: Action[] = [];
   if (book) {
@@ -82,13 +88,26 @@ export function BookActionSheet({ book, onClose }: { book: Book | null; onClose:
       label: 'Remove from library',
       icon: 'trash-outline',
       destructive: true,
-      run: () => data.deleteBook(book.id),
+      run: async () => {
+        const ok = await confirm({
+          title: 'Remove from library',
+          message: `Remove "${book.title}" from your library? This can't be undone.`,
+          confirmLabel: 'Remove',
+          destructive: true,
+        });
+        if (ok) await data.deleteBook(book.id);
+      },
     });
   }
 
   const handle = async (run: Action['run']) => {
     onClose();
-    await run();
+    try {
+      await run();
+    } catch (err) {
+      logError('bookActionSheet.run', err);
+      showToast(toUserMessage(err, 'Couldn’t complete that action. Please try again.'));
+    }
   };
 
   return (
@@ -112,16 +131,13 @@ export function BookActionSheet({ book, onClose }: { book: Book | null; onClose:
           </Text>
         ) : null}
         {actions.map((a) => (
-          <Pressable
+          <PressableScale
             key={a.label}
             onPress={() => handle(a.run)}
+            pressedOpacity={0.5}
             accessibilityRole="button"
             accessibilityLabel={a.label}
-            style={({ pressed }) => [
-              styles.row,
-              { backgroundColor: theme.backgroundElement },
-              pressed && styles.pressed,
-            ]}>
+            style={[styles.row, { backgroundColor: theme.backgroundElement }]}>
             <Ionicons
               name={a.icon}
               size={20}
@@ -131,7 +147,7 @@ export function BookActionSheet({ book, onClose }: { book: Book | null; onClose:
               style={[styles.rowLabel, { color: a.destructive ? '#B4442E' : theme.text }]}>
               {a.label}
             </Text>
-          </Pressable>
+          </PressableScale>
         ))}
         <Pressable
           onPress={onClose}

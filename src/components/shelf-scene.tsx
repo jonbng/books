@@ -1,6 +1,5 @@
 import * as Haptics from 'expo-haptics';
-import { Link, type Href } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, useWindowDimensions, View } from 'react-native';
 import Animated, {
   Extrapolation,
@@ -17,6 +16,7 @@ import { Spacing } from '@/constants/theme';
 import type { Book } from '@/db/books-repo';
 import { useTheme } from '@/hooks/use-theme';
 import { readingPercent } from '@/lib/books';
+import { openBook } from '@/lib/cover-transition';
 
 // Soft page-colored fade at a scroll edge: solid background color at the screen
 // edge, clearing inward, so books dissolve into the margin instead of being
@@ -122,10 +122,10 @@ export function BookShelf({
         onScroll={onScroll}
         scrollEventThrottle={16}
         onContentSizeChange={(w) => {
-          contentWidth.value = w;
+          contentWidth.set(w);
         }}
         onLayout={(e) => {
-          layoutWidth.value = e.nativeEvent.layout.width;
+          layoutWidth.set(e.nativeEvent.layout.width);
         }}>
         {/* The board spans at least the screen — a real shelf doesn't shrink to fit
             a few books; it just sits emptier. It grows + scrolls once books overflow. */}
@@ -178,6 +178,8 @@ function StandingBook({
   // rendered width rather than precomputing it — keeps the contact shadow and the
   // progress track aligned to whatever width the cover settles on.
   const [coverWidth, setCoverWidth] = useState(0);
+  // Measured on tap so the detail screen can fly its hero cover from this spot.
+  const coverRef = useRef<View>(null);
   // Deterministic, subtle lean so the row feels hand-arranged, not pasted.
   const lean = (((book.id * 37) % 5) - 2) * 0.5; // ~ -1°..+1°
 
@@ -194,7 +196,7 @@ function StandingBook({
   // haptic thunk as it lands. Runs once; existing books mount with enterY at 0.
   useEffect(() => {
     if (!justAdded) return;
-    enterY.value = withSpring(0, ENTER_SPRING);
+    enterY.set(withSpring(0, ENTER_SPRING));
     if (process.env.EXPO_OS !== 'web') {
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     }
@@ -203,57 +205,58 @@ function StandingBook({
   }, []);
 
   return (
-    <Link href={`/book/${book.id}` as Href} asChild>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={book.author ? `${book.title}, ${book.author}` : book.title}
-        accessibilityHint="Opens the book. Long press for quick actions."
-        onPressIn={() => {
-          scale.value = withSpring(0.96, PRESS_SPRING);
-        }}
-        onPressOut={() => {
-          scale.value = withSpring(1, PRESS_SPRING);
-        }}
-        onLongPress={onLongPress ? () => onLongPress(book) : undefined}
-        delayLongPress={280}>
-        <Animated.View style={[styles.book, pressStyle]}>
-          <View style={styles.stage}>
-            {/* grounding contact shadow, pinned to where the book meets the ledge */}
-            {coverWidth > 0 ? <View style={[styles.contact, { width: coverWidth * 0.86 }]} /> : null}
-            <View
-              onLayout={(e) => setCoverWidth(e.nativeEvent.layout.width)}
-              style={{
-                // Pivot at the base so the book leans straight back onto the shelf,
-                // foot planted — face-on, no sideways yaw. The recline alone makes
-                // it read as a standing object while keeping the cover square to the
-                // reader, and lets you look slightly down onto the page tops.
-                transformOrigin: '50% 100%',
-                transform: [
-                  { perspective: 800 },
-                  { rotateX: '12deg' },
-                  { rotateZ: `${lean}deg` },
-                ],
-              }}>
-              <BookCover
-                coverUrl={book.coverUrl}
-                coverWidth={book.coverWidth}
-                coverHeight={book.coverHeight}
-                height={coverHeight}
-                elevation="raised"
-                spine
-              />
-              {/* Clay progress strip across the cover's base — overlaid (absolute)
-                  so it never lifts the book off the shelf. Reading-shelf only. */}
-              {showProgress ? (
-                <View style={styles.miniTrack}>
-                  <View style={[styles.miniFill, { width: `${percent}%`, backgroundColor: theme.accent }]} />
-                </View>
-              ) : null}
-            </View>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={book.author ? `${book.title}, ${book.author}` : book.title}
+      accessibilityHint="Opens the book. Long press for quick actions."
+      onPress={() => openBook(book.id, coverRef)}
+      onPressIn={() => {
+        scale.set(withSpring(0.96, PRESS_SPRING));
+      }}
+      onPressOut={() => {
+        scale.set(withSpring(1, PRESS_SPRING));
+      }}
+      onLongPress={onLongPress ? () => onLongPress(book) : undefined}
+      delayLongPress={280}>
+      <Animated.View style={[styles.book, pressStyle]}>
+        <View style={styles.stage}>
+          {/* grounding contact shadow, pinned to where the book meets the ledge */}
+          {coverWidth > 0 ? <View style={[styles.contact, { width: coverWidth * 0.86 }]} /> : null}
+          <View
+            ref={coverRef}
+            collapsable={false}
+            onLayout={(e) => setCoverWidth(e.nativeEvent.layout.width)}
+            style={{
+              // Pivot at the base so the book leans straight back onto the shelf,
+              // foot planted — face-on, no sideways yaw. The recline alone makes
+              // it read as a standing object while keeping the cover square to the
+              // reader, and lets you look slightly down onto the page tops.
+              transformOrigin: '50% 100%',
+              transform: [
+                { perspective: 800 },
+                { rotateX: '12deg' },
+                { rotateZ: `${lean}deg` },
+              ],
+            }}>
+            <BookCover
+              coverUrl={book.coverUrl}
+              coverWidth={book.coverWidth}
+              coverHeight={book.coverHeight}
+              height={coverHeight}
+              elevation="raised"
+              spine
+            />
+            {/* Clay progress strip across the cover's base — overlaid (absolute)
+                so it never lifts the book off the shelf. Reading-shelf only. */}
+            {showProgress ? (
+              <View style={styles.miniTrack}>
+                <View style={[styles.miniFill, { width: `${percent}%`, backgroundColor: theme.accent }]} />
+              </View>
+            ) : null}
           </View>
-        </Animated.View>
-      </Pressable>
-    </Link>
+        </View>
+      </Animated.View>
+    </Pressable>
   );
 }
 

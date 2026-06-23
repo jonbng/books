@@ -164,6 +164,16 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    // Theme override (Settings → Appearance): 'system' follows the OS, 'light' /
+    // 'dark' force it. Existing installs default to 'system' — current behavior.
+    name: '006_theme_preference',
+    up: async (db) => {
+      await db.execAsync(
+        `ALTER TABLE settings ADD COLUMN theme_preference TEXT NOT NULL DEFAULT 'system';`
+      );
+    },
+  },
 ];
 
 let dbPromise: Promise<SQLiteDatabase> | null = null;
@@ -180,6 +190,38 @@ export function getDb(): Promise<SQLiteDatabase> {
     })();
   }
   return dbPromise;
+}
+
+/**
+ * Erase the user's reading data — books, history, sessions, and frozen weeks —
+ * and reset the goal/freeze settings to their defaults, keeping the install
+ * "onboarded" and the theme preference intact. The derived network caches go too;
+ * they refetch on demand. Used by Settings → Reset all data. Irreversible.
+ */
+export async function resetAllData(): Promise<void> {
+  const db = await getDb();
+  await db.withTransactionAsync(async () => {
+    await db.execAsync(`
+      DELETE FROM reading_sessions;
+      DELETE FROM reading_days;
+      DELETE FROM week_freezes;
+      DELETE FROM books;
+      DELETE FROM book_details;
+      DELETE FROM api_cache;
+    `);
+    await db.runAsync(`
+      UPDATE settings SET
+        weekly_target = 5,
+        max_freezes = 3,
+        reminder_enabled = 0,
+        reminder_hour = 20,
+        reminder_minute = 0,
+        yearly_goal = NULL,
+        freezes_earned = 0,
+        freeze_credit_streak = 0
+      WHERE id = 1;
+    `);
+  });
 }
 
 async function migrate(db: SQLiteDatabase): Promise<void> {

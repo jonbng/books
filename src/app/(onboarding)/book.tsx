@@ -12,6 +12,7 @@ import { ThemedView } from '@/components/themed-view';
 import { FontFamily, Spacing } from '@/constants/theme';
 import { useAppData } from '@/hooks/use-app-data';
 import { useTheme } from '@/hooks/use-theme';
+import { logError } from '@/lib/errors';
 import type { BookSearchResult } from '@/services/open-library';
 
 export default function Book() {
@@ -85,6 +86,10 @@ export default function Book() {
     // and two haptics back-to-back read as one buzz. The finish is the moment.
     try {
       await addBookFromSearch(result, 'reading');
+    } catch (err) {
+      // Onboarding should never get stuck on a flaky add — log it and finish
+      // anyway; the user can add the book later from the Shelf.
+      logError('onboarding.onAdd', err);
     } finally {
       finish();
     }

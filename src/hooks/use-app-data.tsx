@@ -45,6 +45,7 @@ import {
   startSession as repoStartSession,
   type ReadingSession,
 } from '@/db/sessions-repo';
+import { resetAllData as repoResetAllData } from '@/db/database';
 import { getSettings, updateSettings, type Settings } from '@/db/settings-repo';
 import { availableFreezes, selectAutoFreezeWeeks } from '@/lib/freezes';
 import { needsOnboarding } from '@/lib/onboarding';
@@ -52,8 +53,11 @@ import { mondayOf, todayISO } from '@/lib/dates';
 import { type Shelf } from '@/lib/books';
 import { aggregateSessions, type SessionAggregates } from '@/lib/sessions';
 import { computeStats, type Stats } from '@/lib/stats';
+import { type ColorSchemePreference } from '@/constants/theme';
 import { computeStreak, type StreakResult } from '@/lib/streak';
+import { logError } from '@/lib/errors';
 import {
+  cancelReminders,
   configureNotificationHandler,
   syncReminder,
 } from '@/services/notifications';
@@ -79,6 +83,10 @@ interface LoadedState {
 
 export interface AppData {
   ready: boolean;
+  /** True when the initial load failed (e.g. the database couldn't open). */
+  loadError: boolean;
+  /** Retry the initial load after a {@link loadError}. */
+  retryLoad: () => void;
   /** True once settings are loaded and first-run onboarding is still unfinished. */
   needsOnboarding: boolean;
   today: string;
@@ -121,11 +129,16 @@ export interface AppData {
   setWeeklyTarget: (target: number) => Promise<void>;
   setMaxFreezes: (max: number) => Promise<void>;
   setYearlyGoal: (goal: number | null) => Promise<void>;
+  setThemePreference: (preference: ColorSchemePreference) => Promise<void>;
   setReminder: (reminder: {
     enabled: boolean;
     hour: number;
     minute: number;
   }) => Promise<void>;
+  /** A JSON snapshot of all on-device data, for the Settings export/backup action. */
+  exportData: () => string | null;
+  /** Erase reading data and reset goal/freeze settings to defaults. Irreversible. */
+  resetAllData: () => Promise<void>;
 
   // Freeze actions
   freezeCurrentWeek: () => Promise<void>;
@@ -161,6 +174,7 @@ const EMPTY_SHELVES: Record<Shelf, Book[]> = {
 
 export function AppDataProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<LoadedState | null>(null);
+  const [loadError, setLoadError] = useState(false);
   const today = todayISO();
 
   const reload = useCallback(async () => {
@@ -215,14 +229,29 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
 
   // Initial load (+ dev seed) and notification setup. Apply any reads tapped on
   // the home-screen widget before the first reload so they're already in the DB.
-  useEffect(() => {
-    (async () => {
+  // A failure here (a database that won't open/migrate) is fatal to the app, so
+  // we flag it and let the UI offer a retry rather than hang on the splash.
+  const bootstrap = useCallback(async () => {
+    try {
       if (__DEV__) await seedDemoDataIfEmpty();
       await drainPendingMarks();
       await reload();
-    })();
-    void configureNotificationHandler();
+      // Clear any prior failure once we've recovered (e.g. a tapped retry). Set
+      // after the awaits so we never call setState synchronously inside the effect.
+      setLoadError(false);
+    } catch (err) {
+      logError('AppData.bootstrap', err);
+      setLoadError(true);
+    }
   }, [reload]);
+
+  useEffect(() => {
+    // bootstrap only ever setState()s after awaiting (drainPendingMarks/reload),
+    // so it never renders synchronously — the rule can't see across the callback.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void bootstrap();
+    void configureNotificationHandler();
+  }, [bootstrap]);
 
   const streak = useMemo<StreakResult | null>(() => {
     if (!state) return null;
@@ -336,6 +365,13 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
 
   // --- actions --------------------------------------------------------------
 
+  // Apply a settings change to local state immediately so toggles/chips track
+  // the tap, then persist + reload to reconcile. The reload lands on the same
+  // value, so the control doesn't snap back and forth (the flicker).
+  const patchSettings = useCallback((patch: Partial<Settings>) => {
+    setState((prev) => (prev ? { ...prev, settings: { ...prev.settings, ...patch } } : prev));
+  }, []);
+
   const toggleToday = useCallback(
     async (opts?: { pages?: number; bookId?: number }) => {
       if (!streak) return;
@@ -385,30 +421,47 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
 
   const setWeeklyTarget = useCallback(
     async (target: number) => {
+      patchSettings({ weeklyTarget: target });
       await updateSettings({ weeklyTarget: target });
       await reload();
     },
-    [reload]
+    [reload, patchSettings]
   );
 
   const setMaxFreezes = useCallback(
     async (max: number) => {
+      patchSettings({ maxFreezes: max });
       await updateSettings({ maxFreezes: max });
       await reload();
     },
-    [reload]
+    [reload, patchSettings]
   );
 
   const setYearlyGoal = useCallback(
     async (goal: number | null) => {
+      patchSettings({ yearlyGoal: goal });
       await updateSettings({ yearlyGoal: goal });
       await reload();
     },
-    [reload]
+    [reload, patchSettings]
+  );
+
+  const setThemePreference = useCallback(
+    async (preference: ColorSchemePreference) => {
+      patchSettings({ themePreference: preference });
+      await updateSettings({ themePreference: preference });
+      await reload();
+    },
+    [reload, patchSettings]
   );
 
   const setReminder = useCallback(
     async (reminder: { enabled: boolean; hour: number; minute: number }) => {
+      patchSettings({
+        reminderEnabled: reminder.enabled,
+        reminderHour: reminder.hour,
+        reminderMinute: reminder.minute,
+      });
       await updateSettings({
         reminderEnabled: reminder.enabled,
         reminderHour: reminder.hour,
@@ -425,8 +478,36 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       });
       await reload();
     },
-    [reload, streak]
+    [reload, streak, patchSettings]
   );
+
+  // A plain JSON snapshot of everything on this device — handed to the OS share
+  // sheet as a portable backup. Reads the already-loaded state, so it's sync.
+  const exportData = useCallback((): string | null => {
+    if (!state) return null;
+    return JSON.stringify(
+      {
+        format: 'books-backup',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        settings: state.settings,
+        readingDays: state.readingDays,
+        frozenWeeks: state.frozenWeeks,
+        books: state.books,
+        sessions: state.sessions,
+      },
+      null,
+      2
+    );
+  }, [state]);
+
+  const resetAllData = useCallback(async () => {
+    await repoResetAllData();
+    // Cancel any scheduled reminders so we don't keep nudging after a wipe; the
+    // reset turned the reminder setting off, and reload reconciles the rest.
+    await cancelReminders();
+    await reload();
+  }, [reload]);
 
   const freezeCurrentWeek = useCallback(async () => {
     await repoFreezeWeek(currentMonday);
@@ -528,6 +609,8 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
 
   const value: AppData = {
     ready: state !== null,
+    loadError,
+    retryLoad: () => void bootstrap(),
     needsOnboarding: needsOnboarding(state?.settings ?? null),
     today,
     streak,
@@ -550,7 +633,10 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
     setWeeklyTarget,
     setMaxFreezes,
     setYearlyGoal,
+    setThemePreference,
     setReminder,
+    exportData,
+    resetAllData,
     freezeCurrentWeek,
     unfreezeCurrentWeek,
     searchBooks,

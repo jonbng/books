@@ -3,9 +3,11 @@ import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { BookCover } from '@/components/book-cover';
+import { useToast } from '@/components/toast/toast-provider';
 import { FontFamily, Spacing } from '@/constants/theme';
 import { useAppData } from '@/hooks/use-app-data';
 import { useTheme } from '@/hooks/use-theme';
+import { logError, toUserMessage } from '@/lib/errors';
 
 /**
  * Picks which book a new reading session is for (a session is always tied to a
@@ -27,13 +29,19 @@ export function StartSessionSheet({
 }) {
   const data = useAppData();
   const theme = useTheme();
+  const { show: showToast } = useToast();
   const insets = useSafeAreaInsets();
   const reading = data.booksByShelf.reading;
 
   const choose = async (bookId: number) => {
     onClose();
-    await data.startSession(bookId);
-    router.push('/session');
+    try {
+      await data.startSession(bookId);
+      router.push('/session');
+    } catch (err) {
+      logError('startSessionSheet.choose', err);
+      showToast(toUserMessage(err, 'Couldn’t start a session. Please try again.'));
+    }
   };
 
   return (

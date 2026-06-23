@@ -1,4 +1,5 @@
 import { Link, type Href } from 'expo-router';
+import { useRef } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { BookCover } from '@/components/book-cover';
@@ -7,6 +8,7 @@ import { FontFamily, Spacing, Type } from '@/constants/theme';
 import type { Book } from '@/db/books-repo';
 import { useTheme } from '@/hooks/use-theme';
 import { dayOfReading, readingPercent } from '@/lib/books';
+import { openBook } from '@/lib/cover-transition';
 import { todayISO } from '@/lib/dates';
 
 export type CurrentlyReadingStripProps = {
@@ -54,19 +56,24 @@ function ReadingRow({ book }: { book: Book }) {
     ? `p. ${book.currentPage} of ${book.totalPages} · ${percent}%`
     : `p. ${book.currentPage}`;
   const progressText = day ? `Day ${day} · ${pageText}` : pageText;
+  // Measured on tap so the detail screen flies its hero cover from this row.
+  const coverRef = useRef<View>(null);
 
   return (
-    <Link href={`/book/${book.id}` as Href} asChild>
-      <Pressable style={({ pressed }) => pressed && styles.pressed}>
-        <Paper style={styles.row}>
+    <Pressable
+      onPress={() => openBook(book.id, coverRef)}
+      style={({ pressed }) => pressed && styles.pressed}>
+      <Paper style={styles.row}>
+        <View ref={coverRef} collapsable={false}>
           <BookCover
             coverUrl={book.coverUrl}
             coverWidth={book.coverWidth}
             coverHeight={book.coverHeight}
             height={COVER_HEIGHT}
           />
+        </View>
 
-          <View style={styles.meta}>
+        <View style={styles.meta}>
             <Text style={[styles.title, { color: theme.text }]} numberOfLines={2}>
               {book.title}
             </Text>
@@ -89,10 +96,9 @@ function ReadingRow({ book }: { book: Book }) {
                 {progressText}
               </Text>
             </View>
-          </View>
-        </Paper>
-      </Pressable>
-    </Link>
+        </View>
+      </Paper>
+    </Pressable>
   );
 }
 

@@ -1,7 +1,9 @@
 import { router } from 'expo-router';
 import { useCallback, useState } from 'react';
 
+import { useToast } from '@/components/toast/toast-provider';
 import { useAppData } from '@/hooks/use-app-data';
+import { logError, toUserMessage } from '@/lib/errors';
 
 /**
  * Shared "begin a reading session" entry logic so every surface (Today, the book
@@ -13,17 +15,23 @@ import { useAppData } from '@/hooks/use-app-data';
  */
 export function useStartSession() {
   const data = useAppData();
+  const { show: showToast } = useToast();
   const [sheetVisible, setSheetVisible] = useState(false);
 
   const begin = useCallback(async () => {
     const reading = data.booksByShelf.reading;
     if (reading.length === 1) {
-      await data.startSession(reading[0].id);
-      router.push('/session');
+      try {
+        await data.startSession(reading[0].id);
+        router.push('/session');
+      } catch (err) {
+        logError('useStartSession.begin', err);
+        showToast(toUserMessage(err, 'Couldn’t start a session. Please try again.'));
+      }
     } else {
       setSheetVisible(true); // 0 → nudge, 2+ → pick
     }
-  }, [data]);
+  }, [data, showToast]);
 
   return {
     begin,

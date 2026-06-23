@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Pressable, StyleSheet, type StyleProp, type ViewStyle } from 'react-native';
+import { StyleSheet, type StyleProp, type ViewStyle } from 'react-native';
 
+import { PressableScale } from '@/components/pressable-scale';
 import { useTheme } from '@/hooks/use-theme';
 
 export type IconButtonProps = {
@@ -26,14 +27,15 @@ export function IconButton({
 }: IconButtonProps) {
   const theme = useTheme();
   return (
-    <Pressable
+    <PressableScale
       onPress={onPress}
       hitSlop={10}
+      pressedOpacity={0.3}
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
-      style={({ pressed }) => [styles.button, pressed && styles.pressed, style]}>
+      style={[styles.button, style]}>
       <Ionicons name={name} size={size} color={color ?? theme.text} />
-    </Pressable>
+    </PressableScale>
   );
 }
 
@@ -45,5 +47,4 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderRadius: 22,
   },
-  pressed: { opacity: 0.45 },
 });

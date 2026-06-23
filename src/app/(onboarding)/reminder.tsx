@@ -1,6 +1,7 @@
+import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
-import { useState } from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { useCallback, useEffect, useState } from 'react';
+import { AppState, Linking, Pressable, StyleSheet, View } from 'react-native';
 import Animated from 'react-native-reanimated';
 
 import { OnboardingButton } from '@/components/onboarding/onboarding-button';
@@ -11,7 +12,7 @@ import { WheelPicker, type WheelOption } from '@/components/wheel-picker';
 import { FontFamily, Spacing } from '@/constants/theme';
 import { useAppData } from '@/hooks/use-app-data';
 import { useTheme } from '@/hooks/use-theme';
-import { isReminderSupported } from '@/services/notifications';
+import { hasPermission, isReminderSupported } from '@/services/notifications';
 
 const PRESETS = [
   { label: 'Morning', hour: 8 },
@@ -53,28 +54,58 @@ export default function Reminder() {
     Math.round((settings?.reminderMinute ?? 0) / 5) * 5 % 60,
   );
   const supported = isReminderSupported();
+  // Surfaces only after a "Set reminder" tap whose OS prompt was denied, so the
+  // user learns reminders won't arrive instead of it failing silently.
+  const [permDenied, setPermDenied] = useState(false);
 
   const h12 = to12(hour);
   const pm = hour >= 12 ? 1 : 0;
 
+  const goNext = useCallback(() => router.push('/(onboarding)/book'), []);
+
   const onSet = async () => {
+    // setReminder requests OS permission as a side effect (via syncReminder).
     await setReminder({ enabled: true, hour, minute });
-    router.push('/(onboarding)/book');
+    if (supported && !(await hasPermission())) {
+      setPermDenied(true);
+      return;
+    }
+    goNext();
   };
 
   const onSkip = async () => {
     await setReminder({ enabled: false, hour, minute });
-    router.push('/(onboarding)/book');
+    goNext();
   };
+
+  // If they grant permission in system settings and return, drop the warning so
+  // the normal "Set reminder" path is available again.
+  useEffect(() => {
+    if (!permDenied) return;
+    const sub = AppState.addEventListener('change', (status) => {
+      if (status !== 'active') return;
+      void hasPermission().then((granted) => {
+        if (granted) setPermDenied(false);
+      });
+    });
+    return () => sub.remove();
+  }, [permDenied]);
 
   return (
     <OnboardingScaffold
       step={2}
       footer={
-        <>
-          <OnboardingButton label="Set reminder" onPress={onSet} />
-          <OnboardingButton label="Maybe later" variant="ghost" onPress={onSkip} />
-        </>
+        permDenied ? (
+          <>
+            <OnboardingButton label="Open settings" onPress={() => void Linking.openSettings()} />
+            <OnboardingButton label="Continue" variant="ghost" onPress={goNext} />
+          </>
+        ) : (
+          <>
+            <OnboardingButton label="Set reminder" onPress={onSet} />
+            <OnboardingButton label="Maybe later" variant="ghost" onPress={onSkip} />
+          </>
+        )
       }>
       <Animated.View entering={enter(0)} style={styles.intro}>
         <ThemedText type="smallBold" themeColor="textSecondary" style={styles.kicker}>
@@ -152,13 +183,32 @@ export default function Reminder() {
         })}
       </Animated.View>
 
-      {!supported && (
-        <Animated.View entering={enter(3)}>
-          <ThemedText type="small" themeColor="textSecondary" style={styles.note}>
-            Reminders need a development build — they won&apos;t fire in Expo Go, but we&apos;ll save
-            your time for later.
-          </ThemedText>
+      {permDenied ? (
+        <Animated.View entering={enter(0)}>
+          <Pressable
+            onPress={() => void Linking.openSettings()}
+            accessibilityRole="button"
+            style={({ pressed }) => [
+              styles.permRow,
+              { backgroundColor: theme.backgroundElement },
+              pressed && styles.pressed,
+            ]}>
+            <Ionicons name="notifications-off-outline" size={20} color={theme.accent} />
+            <ThemedText type="small" themeColor="textSecondary" style={styles.permText}>
+              Notifications are off for Books, so reminders won’t arrive. Turn them on in Settings —
+              or continue and set this up later.
+            </ThemedText>
+          </Pressable>
         </Animated.View>
+      ) : (
+        !supported && (
+          <Animated.View entering={enter(3)}>
+            <ThemedText type="small" themeColor="textSecondary" style={styles.note}>
+              Reminders need a development build — they won&apos;t fire in Expo Go, but we&apos;ll
+              save your time for later.
+            </ThemedText>
+          </Animated.View>
+        )
       )}
     </OnboardingScaffold>
   );
@@ -225,5 +275,20 @@ const styles = StyleSheet.create({
   },
   note: {
     textAlign: 'center',
+  },
+  permRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.three,
+    padding: Spacing.three,
+    borderRadius: 16,
+    borderCurve: 'continuous',
+  },
+  permText: {
+    flex: 1,
+    lineHeight: 20,
+  },
+  pressed: {
+    opacity: 0.7,
   },
 });
