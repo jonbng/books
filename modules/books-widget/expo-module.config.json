@@ -1,0 +1,6 @@
+{
+  "platforms": ["android"],
+  "android": {
+    "modules": ["dk.jonathanb.books.widget.BooksWidgetModule"]
+  }
+}

@@ -7,8 +7,9 @@ import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 
 export function useTheme() {
+  // `useColorScheme()` returns 'light' | 'dark' | null — collapse anything that
+  // isn't an explicit 'dark' to 'light' so a null scheme never indexes Colors
+  // with undefined (which would crash every consumer).
   const scheme = useColorScheme();
-  const theme = scheme === 'unspecified' ? 'light' : scheme;
-
-  return Colors[theme];
+  return Colors[scheme === 'dark' ? 'dark' : 'light'];
 }

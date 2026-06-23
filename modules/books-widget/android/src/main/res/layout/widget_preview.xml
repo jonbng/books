@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Static representation shown in the widget picker (API 31+ previewLayout). A
+     close mock of the live medium layout: big cover left, streak/dots/action right. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:background="@drawable/widget_card_bg"
+    android:padding="14dp">
+
+  <View
+      android:layout_width="58dp"
+      android:layout_height="87dp"
+      android:background="@drawable/widget_cover_ph" />
+
+  <LinearLayout
+      android:layout_width="wrap_content"
+      android:layout_height="wrap_content"
+      android:orientation="vertical"
+      android:layout_marginStart="14dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="3 weeks 🔥"
+        android:textColor="@color/books_widget_ink"
+        android:textSize="17sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="● ● ● ● ○ ○ ○"
+        android:textColor="@color/books_widget_accent"
+        android:textSize="11sp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:background="@drawable/widget_pill"
+        android:gravity="center"
+        android:paddingTop="9dp"
+        android:paddingBottom="9dp"
+        android:text="I read today"
+        android:textColor="@color/books_widget_on_accent"
+        android:textSize="14sp"
+        android:textStyle="bold" />
+  </LinearLayout>
+</LinearLayout>

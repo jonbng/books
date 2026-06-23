@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- Light (oat paper) tones. values-night overrides with the dark palette. Used
+       by the static loading + picker-preview layouts; the live widget colors come
+       from Kotlin day/night ColorProviders. -->
+  <color name="books_widget_bg">#F4EEE2</color>
+  <color name="books_widget_element">#EDE5D5</color>
+  <color name="books_widget_ink">#2E2A24</color>
+  <color name="books_widget_accent">#C0694A</color>
+  <color name="books_widget_on_accent">#FBF6EE</color>
+</resources>

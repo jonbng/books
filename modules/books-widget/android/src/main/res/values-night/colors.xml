@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <color name="books_widget_bg">#1A1611</color>
+  <color name="books_widget_element">#241F18</color>
+  <color name="books_widget_ink">#F2EADD</color>
+  <color name="books_widget_accent">#D98A63</color>
+  <color name="books_widget_on_accent">#1A1611</color>
+</resources>

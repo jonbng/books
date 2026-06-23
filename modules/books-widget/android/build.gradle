@@ -1,0 +1,61 @@
+buildscript {
+  repositories {
+    mavenCentral()
+  }
+  dependencies {
+    // Compose compiler plugin, version-matched to the project's Kotlin
+    // (provided by Expo prebuild via rootProject.extra["kotlinVersion"]).
+    classpath("org.jetbrains.kotlin.plugin.compose:org.jetbrains.kotlin.plugin.compose.gradle.plugin:${kotlinVersion}")
+  }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'expo-module-gradle-plugin'
+apply plugin: 'org.jetbrains.kotlin.plugin.compose'
+
+group = 'dk.jonathanb.books.widget'
+
+android {
+  namespace 'dk.jonathanb.books.widget'
+
+  // The expo-module-gradle-plugin sets up a Maven publication for every local
+  // module and requires `defaultConfig.versionName` (MavenPublicationExtension.kt).
+  // Without it, configuring `:books-widget` fails with
+  // "'android.defaultConfig.versionName' is not defined".
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
+
+  // Jetpack Glance is Compose-based; enable the Compose build feature. With the
+  // Kotlin 2.0+ compose plugin, `composeOptions { kotlinCompilerExtensionVersion }`
+  // is obsolete and must NOT be set.
+  buildFeatures {
+    compose true
+  }
+
+  lintOptions {
+    abortOnError false
+  }
+
+  // Robolectric provides a real Context, SharedPreferences, and org.json so the
+  // snapshot/prefs/date logic can be unit-tested on the JVM.
+  testOptions {
+    unitTests {
+      includeAndroidResources = true
+    }
+  }
+}
+
+dependencies {
+  implementation 'com.facebook.react:react-android'
+
+  // Jetpack Glance — Compose for home-screen app widgets.
+  implementation 'androidx.glance:glance-appwidget:1.1.1'
+
+  implementation 'androidx.core:core-ktx:1.18.0'
+
+  testImplementation 'junit:junit:4.13.2'
+  testImplementation 'org.robolectric:robolectric:4.16.1'
+  testImplementation 'androidx.test:core:1.7.0'
+}
