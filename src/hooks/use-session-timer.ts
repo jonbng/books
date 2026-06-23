@@ -6,10 +6,11 @@
  * of useAppData. This hook ticks locally and is only mounted where the live time
  * is actually shown (the session screen and the Today resume strip).
  *
- * Each tick recomputes elapsed from `startedAt` against the wall clock (never an
- * accumulator), so the value self-corrects after the JS timer is throttled or
- * paused in the background — and it re-syncs immediately when the app returns to
- * the foreground, which is how a session "survives" being backgrounded/killed.
+ * Elapsed is derived from `startedAt` against the wall clock on every render —
+ * never accumulated — so it self-corrects after the JS timer is throttled in the
+ * background and is instantly correct when `startedAt` changes. A 1s interval
+ * (and an app-foreground event) just force a re-render; the setState lives only
+ * in those callbacks, so a session "survives" being backgrounded/killed.
  */
 
 import { useEffect, useState } from 'react';
@@ -18,29 +19,20 @@ import { AppState } from 'react-native';
 import { elapsedSeconds } from '@/lib/sessions';
 
 export function useSessionTimer(startedAt: string | null): number {
-  const [elapsed, setElapsed] = useState(() =>
-    startedAt ? elapsedSeconds(startedAt, new Date().toISOString()) : 0
-  );
+  const [, forceTick] = useState(0);
 
   useEffect(() => {
-    if (!startedAt) {
-      setElapsed(0);
-      return;
-    }
-
-    const tick = () => setElapsed(elapsedSeconds(startedAt, new Date().toISOString()));
-    tick(); // sync immediately on (re)start
-
-    const interval = setInterval(tick, 1000);
+    if (!startedAt) return;
+    const bump = () => forceTick((t) => t + 1);
+    const interval = setInterval(bump, 1000);
     const sub = AppState.addEventListener('change', (status) => {
-      if (status === 'active') tick();
+      if (status === 'active') bump();
     });
-
     return () => {
       clearInterval(interval);
       sub.remove();
     };
   }, [startedAt]);
 
-  return elapsed;
+  return startedAt ? elapsedSeconds(startedAt, new Date().toISOString()) : 0;
 }
